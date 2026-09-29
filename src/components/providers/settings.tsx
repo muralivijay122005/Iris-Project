@@ -3,6 +3,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
 import { SETTINGS_STORAGE_KEY } from "../../lib/settings-key";
 import { DEFAULT_MODEL } from "../../lib/models";
+import { DEFAULT_VOICE } from "../../lib/voices";
 
 export type ThemeMode = "light" | "dark" | "system";
 export type Accent = "lagoon" | "iris" | "ocean" | "rose" | "amber" | "mono";
@@ -17,6 +18,7 @@ export interface Settings {
   sendOnEnter: boolean;
   showReasoning: boolean;
   model: string;
+  voice: string;
 }
 
 export const ACCENTS: { id: Accent; label: string; swatch: string }[] = [
@@ -36,6 +38,7 @@ const DEFAULTS: Settings = {
   sendOnEnter: true,
   showReasoning: true,
   model: DEFAULT_MODEL,
+  voice: DEFAULT_VOICE,
 };
 
 interface SettingsContextValue {

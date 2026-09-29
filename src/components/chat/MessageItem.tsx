@@ -4,6 +4,7 @@ import React, { memo, useEffect, useRef, useState } from "react";
 import {
   LuBrain,
   LuCheck,
+  LuChevronDown,
   LuChevronRight,
   LuCircleAlert,
   LuCopy,
@@ -20,6 +21,9 @@ import Markdown from "./Markdown";
 import { AttachmentChip } from "./AttachmentChip";
 import { IrisMark } from "../ui/brand";
 import { Button, cn, Tooltip } from "../ui/primitives";
+import { useSettings } from "../providers/settings";
+import { VOICES, resolveVoice } from "../../lib/voices";
+import { Speaker } from "../../lib/speech";
 
 interface MessageItemProps {
   message: Message;
@@ -31,17 +35,6 @@ interface MessageItemProps {
   onRegenerate: (index: number) => void;
   onOpenMemory: () => void;
 }
-
-// Rough Markdown → plain text for speech
-const toSpeech = (md: string) =>
-  md
-    .replace(/```[\s\S]*?```/g, " Code block omitted. ")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, "")
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, "$1")
-    .replace(/[#>*_~|-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
 
 function ActionButton({
   label,
@@ -105,6 +98,88 @@ function Reasoning({ text, live }: { text: string; live: boolean }) {
   );
 }
 
+// Voice selector dropdown for TTS
+function VoiceSelector({
+  currentVoice,
+  onSelect,
+  speaking,
+}: {
+  currentVoice: string;
+  onSelect: (voiceId: string) => void;
+  speaking: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (!menuRef.current?.contains(e.target as Node) && !btnRef.current?.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && setOpen(false);
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open]);
+
+  const current = resolveVoice(currentVoice);
+
+  return (
+    <span className="relative inline-flex">
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Select voice"
+        aria-haspopup="menu"
+        className={cn(
+          "inline-flex h-8 items-center gap-1 rounded-lg px-2 text-xs font-medium transition-colors",
+          speaking
+            ? "bg-accent/12 text-accent hover:bg-accent/20"
+            : "text-fg-subtle hover:bg-surface-2 hover:text-fg"
+        )}
+      >
+        {current.label}
+        <LuChevronDown size={12} />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          role="menu"
+          className="animate-pop-in absolute bottom-full left-0 z-[600] mb-2 w-[200px] rounded-xl border border-line bg-elevated p-1 shadow-pop"
+        >
+          <div className="px-2 pb-1 pt-1 text-[11px] font-medium text-fg-subtle">Voice</div>
+          {VOICES.map((v) => (
+            <button
+              key={v.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={currentVoice === v.id}
+              onClick={() => {
+                onSelect(v.id);
+                setOpen(false);
+              }}
+              className="flex w-full items-center gap-2.5 rounded-lg px-2 py-1.5 text-left hover:bg-surface-2"
+            >
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-fg">{v.label}</div>
+                <div className="text-[11px] text-fg-subtle">{v.description}</div>
+              </div>
+              {currentVoice === v.id && <LuCheck size={14} className="shrink-0 text-accent" />}
+            </button>
+          ))}
+        </div>
+      )}
+    </span>
+  );
+}
+
 const MessageItem = memo(function MessageItem({
   message,
   index,
@@ -117,6 +192,8 @@ const MessageItem = memo(function MessageItem({
 }: MessageItemProps) {
   const [copied, setCopied] = useState(false);
   const [editing, setEditing] = useState(false);
+  const { settings, update: updateSettings } = useSettings();
+  const selectedVoice = resolveVoice(settings?.voice).id;
   const [draft, setDraft] = useState(message.content);
   const [speaking, setSpeaking] = useState(false);
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
@@ -134,9 +211,8 @@ const MessageItem = memo(function MessageItem({
     }
   }, [editing, draft]);
 
-  useEffect(() => () => {
-    if (speaking) window.speechSynthesis?.cancel();
-  }, [speaking]);
+  const speakerRef = useRef<Speaker | null>(null);
+  useEffect(() => () => speakerRef.current?.stop(), []);
 
   const copy = async () => {
     try {
@@ -146,20 +222,35 @@ const MessageItem = memo(function MessageItem({
     } catch {}
   };
 
+  const startSpeaking = (voiceId: string) => {
+    speakerRef.current?.stop();
+    const speaker = new Speaker(voiceId, {
+      onEnd: () => {
+        if (speakerRef.current === speaker) {
+          speakerRef.current = null;
+          setSpeaking(false);
+        }
+      },
+    });
+    speakerRef.current = speaker;
+    setSpeaking(true);
+    void speaker.speak(message.content);
+  };
+
   const speak = () => {
-    const synth = window.speechSynthesis;
-    if (!synth) return;
     if (speaking) {
-      synth.cancel();
+      speakerRef.current?.stop();
+      speakerRef.current = null;
       setSpeaking(false);
       return;
     }
-    synth.cancel();
-    const u = new SpeechSynthesisUtterance(toSpeech(message.content));
-    u.onend = () => setSpeaking(false);
-    u.onerror = () => setSpeaking(false);
-    synth.speak(u);
-    setSpeaking(true);
+    startSpeaking(selectedVoice);
+  };
+
+  // Switching voice mid-read restarts with the new voice
+  const handleVoiceChange = (voiceId: string) => {
+    updateSettings({ voice: voiceId });
+    if (speaking) startSpeaking(voiceId);
   };
 
   // ---------- User ----------
@@ -322,6 +413,13 @@ const MessageItem = memo(function MessageItem({
               <ActionButton label={speaking ? "Stop reading" : "Read aloud"} onClick={speak} active={speaking}>
                 {speaking ? <LuVolumeX size={15} /> : <LuVolume2 size={15} />}
               </ActionButton>
+            )}
+            {hasContent && (
+              <VoiceSelector
+                currentVoice={selectedVoice}
+                onSelect={handleVoiceChange}
+                speaking={speaking}
+              />
             )}
             <ActionButton label="Good response" onClick={() => setFeedback(feedback === "up" ? null : "up")} active={feedback === "up"}>
               <LuThumbsUp size={15} fill={feedback === "up" ? "currentColor" : "none"} />

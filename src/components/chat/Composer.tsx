@@ -1,12 +1,30 @@
 "use client";
 
-import React, { forwardRef, useEffect, useImperativeHandle, useRef, useState } from "react";
-import { LuArrowUp, LuCheck, LuChevronDown, LuPaperclip, LuSquare } from "react-icons/lu";
+import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from "react";
+import {
+  LuArrowUp,
+  LuAudioLines,
+  LuCamera,
+  LuCheck,
+  LuChevronDown,
+  LuFileCode,
+  LuFileSpreadsheet,
+  LuFileText,
+  LuFiles,
+  LuFileType,
+  LuImage,
+  LuMic,
+  LuMicOff,
+  LuPlus,
+  LuPresentation,
+  LuSquare,
+} from "react-icons/lu";
 import { MODELS, modelLabel } from "../../lib/models";
 import { useSettings } from "../providers/settings";
 import { useToast } from "../providers/toast";
 import { AttachmentChip } from "./AttachmentChip";
 import { cn, IconButton, Portal, Tooltip, useIsMac } from "../ui/primitives";
+import { useVoiceInput } from "../../hooks/useVoiceInput";
 
 export const MAX_FILES = 5;
 export const MAX_FILE_MB = 10;
@@ -27,13 +45,88 @@ export interface ComposerHandle {
 interface ComposerProps {
   onSend: (text: string, files: PendingFile[]) => void;
   onStop: () => void;
+  onVoiceMode?: () => void;
   isGenerating: boolean;
   placeholder?: string;
   autoFocus?: boolean;
 }
 
+interface AttachOption {
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ size?: number }>;
+  tone: string;
+  accept: string;
+  capture?: boolean;
+  touchOnly?: boolean;
+  separatorBefore?: boolean;
+}
+
+const ATTACH_OPTIONS: AttachOption[] = [
+  {
+    label: "Photos & images",
+    description: "Text and visuals are read by AI",
+    icon: LuImage,
+    tone: "text-violet-500 bg-violet-500/12",
+    accept: "image/*",
+  },
+  {
+    label: "Take photo",
+    description: "Snap a document or whiteboard",
+    icon: LuCamera,
+    tone: "text-pink-500 bg-pink-500/12",
+    accept: "image/*",
+    capture: true,
+    touchOnly: true,
+  },
+  {
+    label: "PDF",
+    description: "Scanned PDFs are OCR'd",
+    icon: LuFileType,
+    tone: "text-red-500 bg-red-500/12",
+    accept: ".pdf,application/pdf",
+  },
+  {
+    label: "Documents",
+    description: "Word, text, Markdown",
+    icon: LuFileText,
+    tone: "text-blue-500 bg-blue-500/12",
+    accept: ".doc,.docx,.txt,.md,.markdown,.rtf,.odt,.html,.htm",
+  },
+  {
+    label: "Spreadsheets",
+    description: "Excel, CSV, TSV",
+    icon: LuFileSpreadsheet,
+    tone: "text-emerald-500 bg-emerald-500/12",
+    accept: ".xlsx,.xls,.csv,.tsv",
+  },
+  {
+    label: "Presentations",
+    description: "PowerPoint slides",
+    icon: LuPresentation,
+    tone: "text-orange-500 bg-orange-500/12",
+    accept: ".pptx,.ppt",
+  },
+  {
+    label: "Code",
+    description: "Source and config files",
+    icon: LuFileCode,
+    tone: "text-sky-500 bg-sky-500/12",
+    accept:
+      ".js,.jsx,.ts,.tsx,.py,.java,.kt,.c,.h,.cpp,.cs,.go,.rs,.rb,.php,.swift,.html,.css,.scss,.json,.xml,.yaml,.yml,.toml,.sql,.sh,.ipynb",
+  },
+  {
+    label: "Any file",
+    description: `Up to ${MAX_FILES} files · ${MAX_FILE_MB} MB each`,
+    icon: LuFiles,
+    tone: "text-fg-muted bg-surface-2",
+    accept: "*/*",
+    separatorBefore: true,
+  },
+];
+
 const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
-  { onSend, onStop, isGenerating, placeholder = "Message Iris", autoFocus },
+  { onSend, onStop, onVoiceMode, isGenerating, placeholder = "Message Iris", autoFocus },
   ref
 ) {
   const { settings, update } = useSettings();
@@ -42,9 +135,22 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   const [text, setText] = useState("");
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
+  const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+
+  const onVoiceResult = useCallback((transcript: string) => {
+    setText((prev) => {
+      const separator = prev && !prev.endsWith(" ") ? " " : "";
+      return prev + separator + transcript;
+    });
+  }, []);
+
+  const voice = useVoiceInput({ onResult: onVoiceResult });
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
+  const attachBtnRef = useRef<HTMLButtonElement>(null);
+  const [fileAccept, setFileAccept] = useState("*/*");
+  const [fileCapture, setFileCapture] = useState(false);
 
   const filesRef = useRef(files);
   filesRef.current = files;
@@ -88,7 +194,11 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
       });
     },
     addFiles,
-    openFilePicker: () => fileInputRef.current?.click(),
+    openFilePicker: () => {
+      setFileAccept("*/*");
+      setFileCapture(false);
+      requestAnimationFrame(() => fileInputRef.current?.click());
+    },
   }));
 
   // Auto-grow up to a max height
@@ -131,6 +241,13 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
     }
   };
 
+  const openAttachOption = (opt: AttachOption) => {
+    setFileAccept(opt.accept);
+    setFileCapture(!!opt.capture);
+    setAttachMenuOpen(false);
+    requestAnimationFrame(() => fileInputRef.current?.click());
+  };
+
   return (
     <div className="w-full">
       <div
@@ -167,16 +284,41 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
           className="block max-h-[260px] w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-fg-subtle"
         />
 
+        {voice.listening && voice.interim && (
+          <div className="mx-4 mb-1 flex items-center gap-2 text-xs text-fg-subtle">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-danger" />
+            <span className="italic opacity-70">{voice.interim}</span>
+          </div>
+        )}
+
         <div className="flex items-center gap-1 p-2 pt-1">
-          <Tooltip label="Attach files" side="top">
+          <Tooltip label="Attach" side="top">
             <IconButton
-              onClick={() => fileInputRef.current?.click()}
-              aria-label="Attach files"
-              className="rounded-full"
+              ref={attachBtnRef}
+              onClick={() => setAttachMenuOpen((o) => !o)}
+              aria-label="Attach"
+              aria-haspopup="menu"
+              aria-expanded={attachMenuOpen}
+              className={cn("rounded-full", attachMenuOpen && "bg-surface-2 text-fg")}
             >
-              <LuPaperclip size={18} />
+              <LuPlus size={18} className={cn("transition-transform duration-200", attachMenuOpen && "rotate-45")} />
             </IconButton>
           </Tooltip>
+
+          {voice.supported && (
+            <Tooltip label={voice.listening ? "Stop dictation" : "Dictate"} side="top">
+              <IconButton
+                onClick={voice.toggle}
+                aria-label={voice.listening ? "Stop dictation" : "Dictate"}
+                className={cn(
+                  "rounded-full transition-colors",
+                  voice.listening && "bg-danger/15 text-danger hover:bg-danger/25 hover:text-danger mic-pulse"
+                )}
+              >
+                {voice.listening ? <LuMicOff size={18} /> : <LuMic size={18} />}
+              </IconButton>
+            </Tooltip>
+          )}
 
           <button
             ref={modelBtnRef}
@@ -205,6 +347,17 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
                   <LuSquare size={13} fill="currentColor" />
                 </button>
               </Tooltip>
+            ) : !canSend && onVoiceMode ? (
+              <Tooltip label="Voice chat" side="top">
+                <button
+                  type="button"
+                  onClick={onVoiceMode}
+                  aria-label="Start voice chat"
+                  className="flex h-9 w-9 items-center justify-center rounded-full bg-fg text-bg transition-opacity hover:opacity-85"
+                >
+                  <LuAudioLines size={18} />
+                </button>
+              </Tooltip>
             ) : (
               <button
                 type="button"
@@ -229,12 +382,22 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
         ref={fileInputRef}
         type="file"
         multiple
+        accept={fileAccept}
+        {...(fileCapture ? { capture: "environment" } : {})}
         className="hidden"
         onChange={(e) => {
           if (e.target.files) addFiles(e.target.files);
           e.target.value = "";
         }}
       />
+
+      {attachMenuOpen && (
+        <AttachMenu
+          anchor={attachBtnRef.current}
+          onPick={openAttachOption}
+          onClose={() => setAttachMenuOpen(false)}
+        />
+      )}
 
       {modelOpen && (
         <ModelMenu
@@ -247,6 +410,88 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
     </div>
   );
 });
+
+function AttachMenu({
+  anchor,
+  onPick,
+  onClose,
+}: {
+  anchor: HTMLElement | null;
+  onPick: (opt: AttachOption) => void;
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [pos, setPos] = useState<{ left: number; bottom: number } | null>(null);
+
+  useEffect(() => {
+    if (!anchor) return;
+    const place = () => {
+      const r = anchor.getBoundingClientRect();
+      setPos({
+        left: Math.max(8, Math.min(r.left, window.innerWidth - 260)),
+        bottom: window.innerHeight - r.top + 8,
+      });
+    };
+    place();
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node) && !anchor.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") return onClose();
+      if (e.key !== "ArrowDown" && e.key !== "ArrowUp") return;
+      e.preventDefault();
+      const items = Array.from(ref.current?.querySelectorAll<HTMLButtonElement>("[role=menuitem]") ?? []);
+      const i = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next = e.key === "ArrowDown" ? (i + 1) % items.length : (i - 1 + items.length) % items.length;
+      items[next]?.focus();
+    };
+    window.addEventListener("resize", place);
+    document.addEventListener("mousedown", onDown);
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.removeEventListener("resize", place);
+      document.removeEventListener("mousedown", onDown);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [anchor, onClose]);
+
+  // The camera option only makes sense on phones and tablets
+  const touch = typeof window !== "undefined" && window.matchMedia("(pointer: coarse)").matches;
+  const options = ATTACH_OPTIONS.filter((o) => !o.touchOnly || touch);
+
+  return (
+    <Portal>
+      <div
+        ref={ref}
+        role="menu"
+        aria-label="Attach"
+        style={{ left: pos?.left ?? -9999, bottom: pos?.bottom ?? -9999 }}
+        className="animate-pop-in fixed z-[600] w-[260px] rounded-2xl border border-line bg-elevated p-1.5 shadow-pop"
+      >
+        <div className="px-2.5 pb-1 pt-1.5 text-xs font-medium text-fg-subtle">Add to chat</div>
+        {options.map((opt) => (
+          <React.Fragment key={opt.label}>
+            {opt.separatorBefore && <div className="mx-2 my-1 h-px bg-line" role="separator" />}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => onPick(opt)}
+              className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left outline-none hover:bg-surface-2 focus-visible:bg-surface-2"
+            >
+              <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", opt.tone)}>
+                <opt.icon size={16} />
+              </span>
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium text-fg">{opt.label}</div>
+                <div className="truncate text-xs text-fg-subtle">{opt.description}</div>
+              </div>
+            </button>
+          </React.Fragment>
+        ))}
+      </div>
+    </Portal>
+  );
+}
 
 function ModelMenu({
   anchor,

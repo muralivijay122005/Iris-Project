@@ -12,6 +12,7 @@ import Splash from "./Splash";
 import ChatHeader from "./chat/ChatHeader";
 import Composer, { ComposerHandle, PendingFile } from "./chat/Composer";
 import EmptyState from "./chat/EmptyState";
+import VoiceMode from "./chat/VoiceMode";
 import MessageItem from "./chat/MessageItem";
 import { useSettings } from "./providers/settings";
 import { useToast } from "./providers/toast";
@@ -68,10 +69,12 @@ export default function ChatApp() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("general");
   const [renameOpen, setRenameOpen] = useState(false);
+  const [voiceOpen, setVoiceOpen] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [showJump, setShowJump] = useState(false);
 
   const composerRef = useRef<ComposerHandle>(null);
+  const sidebarSearchRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottom = useRef(true);
   const abortRef = useRef<AbortController | null>(null);
@@ -193,8 +196,14 @@ export default function ChatApp() {
 
   // ---------- Sending ----------
   const runTurn = useCallback(
-    async (mode: Mode, text: string, files: PendingFile[], index = -1) => {
-      if (generatingRef.current) return;
+    async (
+      mode: Mode,
+      text: string,
+      files: PendingFile[],
+      index = -1,
+      onDelta?: (content: string) => void
+    ): Promise<string | null> => {
+      if (generatingRef.current) return null;
 
       // Failed replies were never saved; drop them so indexes match the server
       const base = messagesRef.current.filter((m) => !m.error);
@@ -306,7 +315,7 @@ export default function ChatApp() {
           } else {
             patchAssistant({ pending: false, error });
           }
-          return;
+          return null;
         }
 
         const reader = res.body.getReader();
@@ -352,6 +361,7 @@ export default function ChatApp() {
             case "delta":
               content += ev.d;
               schedule();
+              onDelta?.(content);
               break;
             case "title":
               if (loadedChatId.current) {
@@ -394,6 +404,7 @@ export default function ChatApp() {
           pending: false,
           error: streamError || (!content ? "Iris returned an empty response. Try again." : undefined),
         });
+        return streamError ? null : content || null;
       } catch (err: any) {
         if (flushTimer) clearTimeout(flushTimer);
         if (err?.name === "AbortError") {
@@ -405,6 +416,7 @@ export default function ChatApp() {
             error: "Connection lost. Check your network and try again.",
           });
         }
+        return null;
       } finally {
         generatingRef.current = false;
         setIsGenerating(false);
@@ -418,6 +430,10 @@ export default function ChatApp() {
   );
 
   const onSend = (text: string, files: PendingFile[]) => runTurn("send", text, files);
+  const askByVoice = useCallback(
+    (text: string, onDelta: (content: string) => void) => runTurn("send", text, [], -1, onDelta),
+    [runTurn]
+  );
   const onEdit = useCallback((i: number, text: string) => runTurn("edit", text, [], i), [runTurn]);
   const onRegenerate = useCallback((i: number) => runTurn("regenerate", "", [], i), [runTurn]);
 
@@ -527,14 +543,21 @@ export default function ChatApp() {
   const logout = () => signOut({ callbackUrl: "/login" });
 
   // ---------- Keyboard shortcuts ----------
-  const dialogOpen = paletteOpen || settingsOpen || renameOpen;
+  const dialogOpen = paletteOpen || settingsOpen || renameOpen || voiceOpen;
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const mod = e.metaKey || e.ctrlKey;
       const key = e.key.toLowerCase();
       if (mod && key === "k") {
         e.preventDefault();
-        setPaletteOpen((o) => !o);
+        // Focus the sidebar search when it's visible; a second press opens the palette
+        const input = sidebarSearchRef.current;
+        if (input && isDesktop && !collapsed && !paletteOpen && document.activeElement !== input) {
+          input.focus();
+          input.select();
+        } else {
+          setPaletteOpen((o) => !o);
+        }
       } else if (mod && e.shiftKey && key === "o") {
         e.preventDefault();
         newChat();
@@ -559,7 +582,7 @@ export default function ChatApp() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [newChat, toggleSidebar, openSettings, stop, dialogOpen]);
+  }, [newChat, toggleSidebar, openSettings, stop, dialogOpen, isDesktop, collapsed, paletteOpen]);
 
   // ---------- Drag & drop ----------
   const dragDepth = useRef(0);
@@ -597,6 +620,7 @@ export default function ChatApp() {
       ref={composerRef}
       onSend={onSend}
       onStop={stop}
+      onVoiceMode={() => setVoiceOpen(true)}
       isGenerating={isGenerating}
       autoFocus
       placeholder={temporary ? "Message Iris (temporary)" : hasMessages ? "Reply to Iris" : "Ask anything"}
@@ -621,6 +645,7 @@ export default function ChatApp() {
         onTogglePin={togglePin}
         onDelete={deleteChat}
         onOpenSearch={() => setPaletteOpen(true)}
+        searchInputRef={sidebarSearchRef}
         onOpenSettings={openSettings}
         onLogout={logout}
       />
@@ -753,6 +778,8 @@ export default function ChatApp() {
         onClose={() => setRenameOpen(false)}
         onSave={(t) => chatId && renameChat(chatId, t)}
       />
+
+      <VoiceMode open={voiceOpen} onClose={() => setVoiceOpen(false)} ask={askByVoice} />
 
       {confirmElement}
     </div>

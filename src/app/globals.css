@@ -2,6 +2,18 @@
 
 @custom-variant dark (&:where(.dark, .dark *));
 
+@font-face {
+  font-family: "Minecraft";
+  src: url("/Minecraft.woff2") format("woff2"), url("/minecraft.woff2") format("woff2");
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+}
+
+.font-minecraft {
+  font-family: "Minecraft", monospace, sans-serif !important;
+}
+
 /* ---------- Design tokens ---------- */
 /* Surfaces are cool graphite with a faint blue tint; the accent is swappable
    (data-accent on <html>) and defaults to "lagoon". */
@@ -92,6 +104,7 @@
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --font-minecraft: 'Minecraft', sans-serif;
 
   --shadow-pop: 0 1px 2px hsl(var(--shadow-color) / 0.08), 0 8px 24px -6px hsl(var(--shadow-color) / 0.18);
   --shadow-dialog: 0 2px 4px hsl(var(--shadow-color) / 0.1), 0 24px 64px -12px hsl(var(--shadow-color) / 0.35);
@@ -112,6 +125,31 @@
 @keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
 @keyframes blink { to { visibility: hidden; } }
 @keyframes dot { 0%, 80%, 100% { opacity: 0.25; transform: scale(0.8); } 40% { opacity: 1; transform: scale(1); } }
+@keyframes mic-ring { 0% { box-shadow: 0 0 0 0 oklch(0.68 0.19 25 / 0.45); } 70% { box-shadow: 0 0 0 8px oklch(0.68 0.19 25 / 0); } 100% { box-shadow: 0 0 0 0 oklch(0.68 0.19 25 / 0); } }
+.mic-pulse { animation: mic-ring 1.5s ease-out infinite; }
+
+/* Voice chat orb */
+@keyframes orb-spin { to { transform: rotate(360deg); } }
+@keyframes orb-breathe { 0%, 100% { transform: scale(0.92); } 50% { transform: scale(1); } }
+@keyframes orb-talk { 0%, 100% { transform: scale(0.96); } 25% { transform: scale(1.04); } 50% { transform: scale(0.99); } 75% { transform: scale(1.06); } }
+.voice-orb {
+  background:
+    radial-gradient(circle at 30% 28%, oklch(1 0 0 / 0.55), transparent 42%),
+    conic-gradient(from 0deg, var(--accent), color-mix(in oklch, var(--accent) 45%, oklch(0.75 0.14 300)), color-mix(in oklch, var(--accent) 55%, oklch(0.85 0.12 180)), var(--accent));
+  box-shadow: 0 0 80px -10px color-mix(in oklch, var(--accent) 60%, transparent), inset 0 -18px 40px oklch(0 0 0 / 0.18);
+  transition: transform 90ms linear, opacity 200ms, filter 200ms;
+}
+.voice-orb::after {
+  content: ""; position: absolute; inset: 8%; border-radius: 9999px;
+  background: conic-gradient(from 90deg, transparent, oklch(1 0 0 / 0.25), transparent 60%);
+  animation: orb-spin 6s linear infinite;
+}
+.voice-orb-think { animation: orb-breathe 1.4s ease-in-out infinite; }
+.voice-orb-think::after { animation-duration: 1.6s; }
+.voice-orb-speak { animation: orb-talk 0.9s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb, .voice-orb::after, .voice-orb-think, .voice-orb-speak { animation: none; transition: none; }
+}
 
 /* ---------- Base ---------- */
 html, body { height: 100%; }

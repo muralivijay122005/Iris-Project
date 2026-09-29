@@ -3,7 +3,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import type { Session } from "next-auth";
 import {
-  LuBrain,
   LuEllipsis,
   LuKeyboard,
   LuLogOut,
@@ -18,6 +17,7 @@ import {
   LuSquarePen,
   LuSun,
   LuTrash2,
+  LuX,
 } from "react-icons/lu";
 import type { ChatSummary } from "../types/chat";
 import { Avatar, IrisMark } from "./ui/brand";
@@ -40,6 +40,7 @@ interface SidebarProps {
   onTogglePin: (chat: ChatSummary) => void;
   onDelete: (chat: ChatSummary) => void;
   onOpenSearch: () => void;
+  searchInputRef?: React.RefObject<HTMLInputElement | null>;
   onOpenSettings: (tab?: string) => void;
   onLogout: () => void;
 }
@@ -111,6 +112,140 @@ function NavButton({
         <Shortcut keys={shortcut} className="opacity-0 transition-opacity group-hover/nav:opacity-100" />
       )}
     </button>
+  );
+}
+
+function SearchBar({
+  collapsed,
+  query,
+  onQuery,
+  onOpenSearch,
+  onSubmit,
+  isDesktop,
+  inputRef,
+}: {
+  collapsed: boolean;
+  query: string;
+  onQuery: (q: string) => void;
+  onOpenSearch: () => void;
+  onSubmit: () => void;
+  isDesktop: boolean;
+  inputRef?: React.RefObject<HTMLInputElement | null>;
+}) {
+  const [focused, setFocused] = useState(false);
+
+  if (collapsed) {
+    return (
+      <Tooltip label="Search chats" side="right" shortcut={["mod", "K"]}>
+        <IconButton onClick={onOpenSearch} aria-label="Search chats">
+          <LuSearch size={17} />
+        </IconButton>
+      </Tooltip>
+    );
+  }
+  return (
+    <div
+      className={cn(
+        "flex h-9 w-full items-center gap-2 rounded-lg border bg-bg px-2.5 text-sm transition-colors",
+        focused ? "border-[color-mix(in_oklch,var(--accent)_50%,var(--border-strong))]" : "border-line hover:border-line-strong"
+      )}
+      onClick={() => inputRef?.current?.focus()}
+    >
+      <LuSearch size={15} className={cn("shrink-0", focused ? "text-fg-muted" : "text-fg-subtle")} />
+      <input
+        ref={inputRef}
+        type="text"
+        role="searchbox"
+        value={query}
+        onChange={(e) => onQuery(e.target.value)}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        onKeyDown={(e) => {
+          if (e.key === "Escape") {
+            e.stopPropagation();
+            if (query) onQuery("");
+            else e.currentTarget.blur();
+          } else if (e.key === "Enter") {
+            e.preventDefault();
+            onSubmit();
+          }
+        }}
+        placeholder="Search chats"
+        aria-label="Search chats"
+        spellCheck={false}
+        className="min-w-0 flex-1 bg-transparent text-fg outline-none placeholder:text-fg-subtle"
+      />
+      {query ? (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            onQuery("");
+            inputRef?.current?.focus();
+          }}
+          aria-label="Clear search"
+          className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-subtle hover:text-fg"
+        >
+          <LuX size={14} />
+        </button>
+      ) : (
+        isDesktop && <Shortcut keys={["mod", "K"]} className="shrink-0" />
+      )}
+    </div>
+  );
+}
+
+// Filters chats by title locally and by message content on the server
+function useChatSearch(chats: ChatSummary[], query: string) {
+  const [remote, setRemote] = useState<ChatSummary[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const q = query.trim();
+
+  useEffect(() => {
+    setRemote(null);
+    if (!q) return;
+    setLoading(true);
+    const ctrl = new AbortController();
+    const t = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?query=${encodeURIComponent(q)}`, { signal: ctrl.signal });
+        if (res.ok) setRemote((await res.json()).chats || []);
+      } catch {
+        /* aborted or offline: title matches still show */
+      } finally {
+        if (!ctrl.signal.aborted) setLoading(false);
+      }
+    }, 250);
+    return () => {
+      clearTimeout(t);
+      ctrl.abort();
+    };
+  }, [q]);
+
+  const results = useMemo(() => {
+    if (!q) return null;
+    const needle = q.toLowerCase();
+    const local = chats.filter((c) => c.title.toLowerCase().includes(needle));
+    const seen = new Set(local.map((c) => c._id));
+    const snippets = new Map((remote || []).map((c) => [c._id, c.snippet]));
+    return [
+      ...local.map((c) => ({ ...c, snippet: snippets.get(c._id) ?? null })),
+      ...(remote || []).filter((c) => !seen.has(c._id)),
+    ];
+  }, [chats, remote, q]);
+
+  return { results, loading: loading && !!q };
+}
+
+function Highlight({ text, query }: { text: string; query: string }) {
+  const i = text.toLowerCase().indexOf(query.toLowerCase());
+  if (!query || i < 0) return <>{text}</>;
+  return (
+    <>
+      {text.slice(0, i)}
+      <mark className="rounded-sm bg-accent/20 text-fg">{text.slice(i, i + query.length)}</mark>
+      {text.slice(i + query.length)}
+    </>
   );
 }
 
@@ -237,6 +372,7 @@ const Sidebar: React.FC<SidebarProps> = (props) => {
     onTogglePin,
     onDelete,
     onOpenSearch,
+    searchInputRef,
     onOpenSettings,
     onLogout,
   } = props;
@@ -244,6 +380,8 @@ const Sidebar: React.FC<SidebarProps> = (props) => {
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const userBtnRef = useRef<HTMLButtonElement>(null);
   const groups = useMemo(() => groupChats(chats), [chats]);
+  const [query, setQuery] = useState("");
+  const { results, loading: searching } = useChatSearch(chats, query);
 
   // On mobile the sidebar is always the full drawer
   const rail = isDesktop && collapsed;
@@ -303,7 +441,7 @@ const Sidebar: React.FC<SidebarProps> = (props) => {
                 <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-accent text-accent-fg">
                   <IrisMark size={15} />
                 </span>
-                <span className="text-[15px] font-semibold tracking-tight">Iris</span>
+                <span className="text-[15px] font-minecraft tracking-tight">iris</span>
               </button>
               <Tooltip label="Close sidebar" shortcut={isDesktop ? ["mod", "B"] : undefined}>
                 <IconButton
@@ -320,13 +458,59 @@ const Sidebar: React.FC<SidebarProps> = (props) => {
         {/* Primary actions */}
         <nav className={cn("flex shrink-0 flex-col gap-0.5", rail ? "items-center px-0" : "px-2")}>
           <NavButton icon={<LuSquarePen size={17} />} label="New chat" onClick={pick(onNewChat)} shortcut={["mod", "shift", "O"]} collapsed={rail} />
-          <NavButton icon={<LuSearch size={17} />} label="Search chats" onClick={pick(onOpenSearch)} shortcut={["mod", "K"]} collapsed={rail} />
-          <NavButton icon={<LuBrain size={17} />} label="Memory" onClick={pick(() => onOpenSettings("memory"))} collapsed={rail} />
+          <div className={cn(!rail && "mt-1")}>
+            <SearchBar
+              collapsed={rail}
+              query={query}
+              onQuery={setQuery}
+              onOpenSearch={pick(onOpenSearch)}
+              onSubmit={() => {
+                const first = results?.[0];
+                if (first) pick(() => onSelectChat(first._id))();
+              }}
+              isDesktop={isDesktop}
+              inputRef={searchInputRef}
+            />
+          </div>
         </nav>
 
         {/* History */}
         <div className={cn("mt-3 min-h-0 flex-1 overflow-y-auto px-2 pb-3", rail && "invisible")}>
-          {chatsLoading && chats.length === 0 ? (
+          {results ? (
+            <section aria-label="Search results">
+              <h3 className="flex h-8 items-center justify-between px-2.5 text-xs font-medium text-fg-subtle">
+                <span>{searching && !results.length ? "Searching…" : `${results.length} result${results.length === 1 ? "" : "s"}`}</span>
+                {searching && results.length > 0 && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />}
+              </h3>
+              {results.length === 0 && !searching ? (
+                <div className="px-3 py-6 text-center text-sm text-fg-subtle">No chats match “{query.trim()}”.</div>
+              ) : (
+                <ul className="space-y-px">
+                  {results.map((c) => (
+                    <li key={c._id}>
+                      <button
+                        type="button"
+                        onClick={pick(() => onSelectChat(c._id))}
+                        className={cn(
+                          "w-full rounded-lg px-2.5 py-1.5 text-left text-sm transition-colors",
+                          c._id === activeChatId ? "bg-surface-2 text-fg" : "text-fg/85 hover:bg-surface-2/70 hover:text-fg"
+                        )}
+                      >
+                        <span className="block truncate">
+                          <Highlight text={c.title} query={query.trim()} />
+                        </span>
+                        {c.snippet && (
+                          <span className="mt-0.5 block truncate text-xs text-fg-subtle">
+                            <Highlight text={c.snippet} query={query.trim()} />
+                          </span>
+                        )}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          ) : chatsLoading && chats.length === 0 ? (
             <div className="space-y-1.5 px-1 pt-2" aria-label="Loading chats">
               {[70, 55, 80, 45, 62].map((w, i) => (
                 <div key={i} className="h-7 animate-pulse rounded-md bg-surface-2/70" style={{ width: `${w}%` }} />

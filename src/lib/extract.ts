@@ -3,6 +3,7 @@
 import pdfParse from "pdf-parse-debugging-disabled";
 import mammoth from "mammoth";
 import JSZip from "jszip";
+import { readImage, readScannedPdf } from "./vision";
 
 export const MAX_FILES = 5;
 export const MAX_FILE_BYTES = 10 * 1024 * 1024;
@@ -110,6 +111,38 @@ async function extractXlsx(buf: Buffer): Promise<string> {
   return out.join("\n\n");
 }
 
+// Image formats the vision pipeline can decode
+const IMAGE_TYPES = new Set(["image/jpeg", "image/png", "image/gif", "image/webp", "image/bmp", "image/tiff", "image/avif"]);
+
+// A text layer this thin means the PDF is scanned (or mostly images)
+const needsPdfOcr = (text: string, pages: number) =>
+  text.replace(/\s+/g, "").length < Math.max(40, pages * 25);
+
+async function extractPdf(buf: Buffer): Promise<string> {
+  let text = "";
+  let pages = 1;
+  try {
+    const parsed = await pdfParse(buf);
+    text = parsed.text?.trim() || "";
+    pages = parsed.numpages || 1;
+  } catch (err: any) {
+    console.warn("[extract] pdf-parse failed, trying OCR:", err?.message);
+  }
+  if (!needsPdfOcr(text, pages)) return text;
+
+  try {
+    const ocr = await readScannedPdf(buf);
+    if (ocr.text) {
+      const note =
+        ocr.read < ocr.pages ? `\n\n[Only the first ${ocr.read} of ${ocr.pages} pages were read.]` : "";
+      return `[Scanned PDF, text recovered with OCR]\n${ocr.text}${note}`;
+    }
+  } catch (err: any) {
+    console.warn("[extract] PDF OCR failed:", err?.message);
+  }
+  return text;
+}
+
 export async function extractAttachment(file: File): Promise<ExtractedAttachment> {
   const buf = Buffer.from(await file.arrayBuffer());
   const ext = extOf(file.name);
@@ -117,9 +150,12 @@ export async function extractAttachment(file: File): Promise<ExtractedAttachment
   const base = { name: file.name, size: file.size, type };
 
   let text = "";
+
   try {
-    if (type === "application/pdf" || ext === "pdf") {
-      text = (await pdfParse(buf)).text;
+    if (IMAGE_TYPES.has(type) || /^(jpe?g|png|gif|webp|bmp|tiff?|avif)$/.test(ext)) {
+      text = await readImage(buf, type.startsWith("image/") ? type : `image/${ext === "jpg" ? "jpeg" : ext}`, file.name);
+    } else if (type === "application/pdf" || ext === "pdf") {
+      text = await extractPdf(buf);
     } else if (ext === "docx") {
       text = (await mammoth.extractRawText({ buffer: buf })).value;
     } else if (ext === "pptx") {
@@ -148,8 +184,10 @@ export async function extractAttachment(file: File): Promise<ExtractedAttachment
 // Human-readable reason the model can't see a file's contents
 export function unreadableNote(att: { name: string; type: string }) {
   if (att.type.startsWith("image/"))
-    return "This is an image. You cannot view images; only the file name and size are available.";
+    return "This image couldn't be read (unsupported format or the vision service was unavailable). Only the file name is available.";
   if (att.type.startsWith("audio/") || att.type.startsWith("video/"))
     return "This is a media file. Its contents are not available to you.";
+  if (att.type === "application/pdf" || /\.pdf$/i.test(att.name))
+    return "No text could be recovered from this PDF, even with OCR.";
   return "The contents of this file could not be extracted as text.";
 }

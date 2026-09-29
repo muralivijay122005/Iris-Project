@@ -132,7 +132,7 @@ function LoginForm() {
         <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-accent text-accent-fg">
           <IrisMark size={18} />
         </span>
-        <span className="text-lg font-semibold tracking-tight">Iris</span>
+        <span className="text-lg font-minecraft tracking-tight">iris</span>
       </div>
 
       <h1 className="text-[28px] font-semibold tracking-tight text-fg">
