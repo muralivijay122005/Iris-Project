@@ -57,3 +57,25 @@ export function Avatar({
     </span>
   );
 }
+
+// Animated "working" star: eight rays ripple in a wave while it slowly turns
+export function Spark({ size = 18, className }: { size?: number; className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" width={size} height={size} aria-hidden className={cn("spark shrink-0", className)}>
+      {Array.from({ length: 8 }, (_, i) => (
+        <g key={i} transform={`rotate(${i * 45} 12 12)`}>
+          <line
+            x1="12"
+            y1="2.2"
+            x2="12"
+            y2="8.6"
+            stroke="currentColor"
+            strokeWidth={i % 2 ? 2 : 2.6}
+            strokeLinecap="round"
+            style={{ animationDelay: `${(-i * 1.15) / 8}s` }}
+          />
+        </g>
+      ))}
+    </svg>
+  );
+}

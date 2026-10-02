@@ -18,12 +18,14 @@ import {
 import type { Message } from "../../types/chat";
 import { modelLabel } from "../../lib/models";
 import Markdown from "./Markdown";
+import GeneratedImages, { ImagePlaceholder } from "./GeneratedImages";
 import { AttachmentChip } from "./AttachmentChip";
-import { IrisMark } from "../ui/brand";
+import { IrisMark, Spark } from "../ui/brand";
 import { Button, cn, Tooltip } from "../ui/primitives";
 import { useSettings } from "../providers/settings";
 import { VOICES, resolveVoice } from "../../lib/voices";
 import { Speaker } from "../../lib/speech";
+import { useSmoothText } from "../../hooks/useSmoothText";
 
 interface MessageItemProps {
   message: Message;
@@ -81,10 +83,11 @@ function Reasoning({ text, live }: { text: string; live: boolean }) {
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center gap-1.5 rounded-lg py-1 text-sm text-fg-muted hover:text-fg"
+        className="inline-flex items-center gap-2 rounded-lg py-1 text-sm text-fg-muted hover:text-fg"
         aria-expanded={open}
       >
-        <span className={live ? "shimmer-text font-medium" : ""}>
+        {live && <Spark size={18} className="text-accent" />}
+        <span className={live ? "status-shimmer font-medium" : ""}>
           {live ? "Thinking" : seconds ? `Thought for ${seconds}s` : "Thought process"}
         </span>
         <LuChevronRight size={14} className={cn("transition-transform", open && "rotate-90")} />
@@ -92,6 +95,67 @@ function Reasoning({ text, live }: { text: string; live: boolean }) {
       {open && (
         <div className="animate-fade-in mt-1.5 whitespace-pre-wrap border-l-2 border-line-strong pl-4 text-[13.5px] leading-6 text-fg-subtle">
           {text}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const WORK_VERBS = [
+  "Thinking",
+  "Pondering",
+  "Irising",
+  "Mulling it over",
+  "Connecting dots",
+  "Brewing ideas",
+  "Composing",
+  "Polishing",
+];
+
+// Animated "working" indicator shown while Iris thinks or writes
+function WorkingStatus({ label, compact }: { label?: string; compact?: boolean }) {
+  const [i, setI] = useState(0);
+  const [seconds, setSeconds] = useState(0);
+  const [showLines, setShowLines] = useState(false);
+  useEffect(() => {
+    if (label) return;
+    const t = setInterval(() => setI((n) => (n + 1) % WORK_VERBS.length), 2400);
+    return () => clearInterval(t);
+  }, [label]);
+  useEffect(() => {
+    const start = Date.now();
+    const t = setInterval(() => setSeconds(Math.floor((Date.now() - start) / 1000)), 1000);
+    // Placeholder lines only if the wait is noticeable
+    const lines = setTimeout(() => setShowLines(true), 700);
+    return () => {
+      clearInterval(t);
+      clearTimeout(lines);
+    };
+  }, []);
+  const text = label || WORK_VERBS[i];
+
+  if (compact) {
+    return (
+      <div className="mt-3 flex h-6 items-center text-accent" role="status" aria-label="Iris is writing">
+        <Spark size={18} />
+      </div>
+    );
+  }
+
+  return (
+    <div role="status" aria-label={`Iris is ${text.toLowerCase()}`}>
+      <div className="flex h-7 items-center gap-2.5 text-[14.5px]">
+        <Spark size={20} className="text-accent" />
+        <span key={text} className="verb-in status-shimmer font-medium">
+          {text}…
+        </span>
+        {seconds >= 3 && <span className="text-xs tabular-nums text-fg-subtle">{seconds}s</span>}
+      </div>
+      {showLines && !label && (
+        <div className="mt-3 space-y-2.5" aria-hidden>
+          {[94, 82, 58].map((w, n) => (
+            <div key={n} className="skeleton-line" style={{ width: `${w}%`, animationDelay: `${n * 120}ms, ${n * 150}ms` }} />
+          ))}
         </div>
       )}
     </div>
@@ -337,9 +401,12 @@ const MessageItem = memo(function MessageItem({
   }
 
   // ---------- Assistant ----------
-  const streaming = !!message.pending;
+  const pending = !!message.pending;
+  const { text: visible, revealing } = useSmoothText(message.content, pending);
+  // Still "streaming" while the reveal catches up after the network finishes
+  const streaming = pending || revealing;
   const hasContent = message.content.length > 0;
-  const thinking = streaming && !hasContent;
+  const thinking = pending && !hasContent;
 
   return (
     <div className="group/msg flex gap-4">
@@ -347,7 +414,7 @@ const MessageItem = memo(function MessageItem({
         <span
           className={cn(
             "flex h-7 w-7 items-center justify-center rounded-full border border-line bg-elevated text-accent",
-            streaming && "animate-pulse"
+            streaming && "avatar-working"
           )}
         >
           <IrisMark size={14} />
@@ -359,15 +426,15 @@ const MessageItem = memo(function MessageItem({
           <Reasoning text={message.reasoning} live={thinking} />
         )}
 
-        {thinking && !message.reasoning && (
-          <div className="flex h-7 items-center gap-1" aria-label="Iris is thinking">
-            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-fg-muted" />
-            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-fg-muted" />
-            <span className="typing-dot h-1.5 w-1.5 rounded-full bg-fg-muted" />
-          </div>
-        )}
+        {thinking && !(showReasoning && message.reasoning) && <WorkingStatus label={message.status} />}
 
-        {hasContent && <Markdown content={message.content} />}
+        {pending && !!message.status && message.status !== "Imagining" && !message.images?.length && <ImagePlaceholder />}
+
+        {!!message.images?.length && <GeneratedImages images={message.images} />}
+
+        {hasContent && <Markdown content={visible} streaming={streaming} />}
+
+        {streaming && hasContent && <WorkingStatus compact />}
 
         {message.error && (
           <div className="mt-1 flex flex-wrap items-center gap-3 rounded-xl border border-danger/25 bg-danger/8 px-3.5 py-2.5 text-sm text-danger">

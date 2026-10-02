@@ -6,9 +6,9 @@ import remarkGfm from "remark-gfm";
 import CodeBlock from "../CodeBlock";
 
 // Renders assistant Markdown (GFM: tables, task lists, strikethrough, autolinks)
-const Markdown = memo(function Markdown({ content }: { content: string }) {
+const Markdown = memo(function Markdown({ content, streaming }: { content: string; streaming?: boolean }) {
   return (
-    <div className="prose-iris">
+    <div className={streaming ? "prose-iris is-streaming" : "prose-iris"}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
@@ -31,7 +31,7 @@ const Markdown = memo(function Markdown({ content }: { content: string }) {
           a: ({ node, ...props }) => <a {...props} target="_blank" rel="noopener noreferrer" />,
           // eslint-disable-next-line @typescript-eslint/no-unused-vars
           table: ({ node, ...props }) => (
-            <div className="my-4 overflow-x-auto rounded-xl border border-line">
+            <div className="table-scroll my-4 max-w-full overflow-x-auto rounded-xl border border-line">
               <table {...props} />
             </div>
           ),

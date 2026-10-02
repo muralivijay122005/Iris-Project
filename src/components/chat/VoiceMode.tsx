@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { LuMic, LuMicOff, LuX } from "react-icons/lu";
 import { VOICES } from "../../lib/voices";
-import { Speaker } from "../../lib/speech";
+import { Cue, EMOJI, Speaker } from "../../lib/speech";
 import { useSettings } from "../providers/settings";
 import { useToast } from "../providers/toast";
 import { cn, Portal } from "../ui/primitives";
@@ -19,6 +19,7 @@ interface VoiceModeProps {
 
 // Voice activity detection
 const SILENCE_MS = 1300; // pause that ends a turn
+const SHORT_SILENCE_MS = 900; // ...after a very short utterance
 const MIN_SPEECH_MS = 250; // ignore clicks and pops
 const MAX_TURN_MS = 60_000;
 const CALIBRATE_MS = 400;
@@ -32,9 +33,71 @@ const STATUS: Record<Phase, string> = {
   muted: "Microphone muted",
 };
 
+// Whisper invents these on silence or noise
+const HALLUCINATIONS = [
+  /^(thank you|thanks)( (so much|very much))?( for watching| for listening)?[.!]*$/i,
+  /^(you|bye|okay|so|uh|um|hmm)[.!]*$/i,
+  /^[.\s…-]+$/,
+  /subtitles? (by|provided)|amara\.org|please subscribe|like and subscribe/i,
+];
+const isHallucination = (text: string) => HALLUCINATIONS.some((re) => re.test(text.trim()));
+
+const cleanTranscript = (text: string) =>
+  text
+    .replace(EMOJI, "")
+    .replace(/\[(music|noise|silence|inaudible|blank_audio)\]|\((music|noise|silence|inaudible)\)/gi, "")
+    .replace(/\s+/g, " ")
+    .trim();
+
+// Browser speech recognition, used only for live captions while you talk
+type Recognizer = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  start: () => void;
+  abort: () => void;
+  onresult: ((e: any) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+};
+function createRecognizer(): Recognizer | null {
+  if (typeof window === "undefined") return null;
+  const Ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+  if (!Ctor) return null;
+  try {
+    const r: Recognizer = new Ctor();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = navigator.language || "en-US";
+    return r;
+  } catch {
+    return null;
+  }
+}
+
 function pickMime() {
   const options = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg;codecs=opus"];
   return options.find((t) => typeof MediaRecorder !== "undefined" && MediaRecorder.isTypeSupported(t)) || "";
+}
+
+// One subtitle cue, lit word by word in step with the voice
+function Subtitle({ cue }: { cue: Cue }) {
+  return (
+    <p key={cue.id} className="subtitle-in subtitle-text line-clamp-3" aria-live="off">
+      {cue.words.map((w, i) => (
+        <span
+          key={i}
+          className={cn(
+            "transition-colors duration-200",
+            i < cue.current ? "text-fg" : i === cue.current ? "text-accent" : "text-fg/25"
+          )}
+        >
+          {w}
+          {i < cue.words.length - 1 ? " " : ""}
+        </span>
+      ))}
+    </p>
+  );
 }
 
 export default function VoiceMode({ open, onClose, ask }: VoiceModeProps) {
@@ -47,7 +110,7 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
   const toast = useToast();
   const [phase, setPhase] = useState<Phase>("starting");
   const [heard, setHeard] = useState("");
-  const [reply, setReply] = useState("");
+  const [cue, setCue] = useState<Cue | null>(null);
   const [level, setLevel] = useState(0);
   const [muted, setMuted] = useState(false);
 
@@ -68,12 +131,49 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
   // Interrupting during a reply: text that arrives later is ignored
   const turnRef = useRef(0);
 
+  const [interim, setInterimState] = useState("");
+  const interimRef = useRef("");
+  const setInterim = (t: string) => {
+    interimRef.current = t;
+    setInterimState(t);
+  };
+  const contextRef = useRef("");
+  const recognizerRef = useRef<Recognizer | null>(null);
+
+  // Live captions are best-effort: Whisper still produces the real transcript
+  const startCaptions = () => {
+    stopCaptions();
+    const r = createRecognizer();
+    if (!r) return;
+    r.onresult = (e: any) => {
+      let text = "";
+      for (let i = 0; i < e.results.length; i++) text += e.results[i][0].transcript;
+      setInterim(cleanTranscript(text));
+    };
+    r.onerror = () => {};
+    r.onend = () => {
+      if (recognizerRef.current === r) recognizerRef.current = null;
+    };
+    try {
+      r.start();
+      recognizerRef.current = r;
+    } catch {}
+  };
+  const stopCaptions = () => {
+    const r = recognizerRef.current;
+    recognizerRef.current = null;
+    try {
+      r?.abort();
+    } catch {}
+  };
+
   const go = (p: Phase) => {
     phaseRef.current = p;
     setPhase(p);
   };
 
   const stopRecorder = (discard: boolean) => {
+    stopCaptions();
     const rec = recorderRef.current;
     if (!rec) return;
     recorderRef.current = null;
@@ -105,10 +205,16 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
     let floor = 0.01;
     let samples = 0;
     let speechStart = 0;
+    let firstSpeech = 0;
     let lastVoice = 0;
     let spoke = false;
+    let active = false; // currently above the speech threshold
+
+    setInterim("");
+    startCaptions();
 
     rec.onstop = () => {
+      stopCaptions();
       if (closedRef.current || !spoke) return;
       const blob = new Blob(parts, { type: rec.mimeType || "audio/webm" });
       void handleTurn(blob);
@@ -128,15 +234,27 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
       if (now - startedAt < CALIBRATE_MS) {
         floor = (floor * samples + rms) / ++samples;
       } else {
-        const threshold = Math.max(0.018, floor * 3);
-        if (rms > threshold) {
+        // Hysteresis: speech starts above `onset` but only ends below `release`,
+        // so soft word endings don't count as silence
+        const onset = Math.max(0.018, floor * 3);
+        const release = Math.max(0.012, floor * 1.8);
+        if (rms > (active ? release : onset)) {
+          active = true;
           if (!speechStart) speechStart = now;
           lastVoice = now;
-          if (now - speechStart > MIN_SPEECH_MS) spoke = true;
-        } else if (speechStart && !spoke && now - lastVoice > 300) {
-          speechStart = 0; // just a blip
+          if (!spoke && now - speechStart > MIN_SPEECH_MS) {
+            spoke = true;
+            firstSpeech = speechStart;
+          }
+        } else {
+          active = false;
+          // Keep learning the room's noise while nobody is talking
+          if (!speechStart || now - lastVoice > 500) floor = floor * 0.985 + rms * 0.015;
+          if (speechStart && !spoke && now - lastVoice > 300) speechStart = 0; // just a blip
         }
-        if ((spoke && now - lastVoice > SILENCE_MS) || now - startedAt > MAX_TURN_MS) {
+        // Short answers ("yes", "stop") end sooner than long thoughts
+        const pause = spoke && lastVoice - firstSpeech < 1200 ? SHORT_SILENCE_MS : SILENCE_MS;
+        if ((spoke && now - lastVoice > pause) || now - startedAt > MAX_TURN_MS) {
           recorderRef.current = null;
           setLevel(0);
           if (spoke) go("transcribing");
@@ -159,33 +277,37 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
       const form = new FormData();
       const ext = audio.type.includes("mp4") ? "m4a" : audio.type.includes("ogg") ? "ogg" : "webm";
       form.append("audio", audio, `speech.${ext}`);
+      // The last exchange gives Whisper context for names and jargon
+      form.append("prompt", `Iris. ${contextRef.current}`.slice(-600));
       const res = await fetch("/api/voice/transcribe", { method: "POST", body: form });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "Transcription failed");
-      text = (data.text || "").trim();
+      text = cleanTranscript(data.text || "");
     } catch (err: any) {
       if (closedRef.current) return;
-      toast(err?.message || "Couldn't hear that", { kind: "error" });
+      // Fall back to the browser's live captions when they caught something
+      text = cleanTranscript(interimRef.current);
+      if (!text) toast(err?.message || "Couldn't hear that", { kind: "error" });
     }
     if (closedRef.current || turn !== turnRef.current) return;
-    // Whisper hallucinates these on near-silence
-    if (!text || /^(thank you\.?|thanks for watching!?|\.+|you)$/i.test(text)) {
+    if (!text || isHallucination(text)) {
       listen();
       return;
     }
 
     setHeard(text);
-    setReply("");
+    setInterim("");
+    setCue(null);
     go("thinking");
 
     const speaker = new Speaker(voiceRef.current, {
       onStart: () => turn === turnRef.current && phaseRef.current !== "speaking" && go("speaking"),
+      onCue: (c) => turn === turnRef.current && c && setCue(c),
     });
     speakerRef.current = speaker;
 
     const full = await askRef.current(text, (content) => {
       if (turn !== turnRef.current) return;
-      setReply(content);
       speaker.push(content);
     });
     if (closedRef.current || turn !== turnRef.current) return;
@@ -195,10 +317,11 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
       listen();
       return;
     }
-    setReply(full);
+    contextRef.current = `${text} ${full}`.replace(EMOJI, "").slice(-500);
     await speaker.end(full);
     if (closedRef.current || turn !== turnRef.current) return;
     speakerRef.current = null;
+    setCue(null);
     listen();
   };
 
@@ -208,6 +331,7 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
     turnRef.current++;
     speakerRef.current?.stop();
     speakerRef.current = null;
+    setCue(null);
     listen();
   };
 
@@ -271,6 +395,24 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // While Iris talks, the orb follows the loudness of her voice
+  useEffect(() => {
+    if (phase !== "speaking") return;
+    let raf = 0;
+    let smooth = 0;
+    const tick = () => {
+      const target = speakerRef.current?.level() ?? 0;
+      smooth += (target - smooth) * (target > smooth ? 0.45 : 0.12);
+      setLevel(smooth);
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => {
+      cancelAnimationFrame(raf);
+      setLevel(0);
+    };
+  }, [phase]);
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -284,7 +426,6 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onClose]);
 
-  const caption = phase === "speaking" || phase === "thinking" ? reply : "";
 
   return (
     <Portal>
@@ -304,33 +445,40 @@ function VoiceSession({ onClose, ask }: Omit<VoiceModeProps, "open">) {
             type="button"
             onClick={phase === "muted" ? toggleMute : interrupt}
             aria-label={phase === "speaking" ? "Interrupt" : STATUS[phase]}
-            className="relative flex h-56 w-56 items-center justify-center rounded-full outline-none sm:h-64 sm:w-64"
+            className="relative flex h-44 w-44 items-center justify-center rounded-full outline-none sm:h-56 sm:w-56"
           >
             <span
               className={cn(
                 "voice-orb absolute inset-0 rounded-full",
                 phase === "thinking" || phase === "transcribing" ? "voice-orb-think" : "",
-                phase === "speaking" && "voice-orb-speak",
                 (phase === "muted" || phase === "starting") && "opacity-40 grayscale"
               )}
               style={{
-                transform: phase === "listening" ? `scale(${0.9 + level * 0.25})` : undefined,
+                transform:
+                  phase === "listening" || phase === "speaking" ? `scale(${0.9 + level * 0.22})` : undefined,
               }}
             />
           </button>
 
-          <div className="flex min-h-[7rem] w-full max-w-xl flex-col items-center gap-3 text-center">
-            <div className="text-sm font-medium text-fg-muted" aria-live="polite">
+          <div className="flex w-full max-w-2xl flex-col items-center gap-4 text-center">
+            <div className="text-[13px] font-medium uppercase tracking-[0.08em] text-fg-subtle" aria-live="polite">
               {STATUS[phase]}
             </div>
-            {heard && (
-              <p className="line-clamp-2 text-sm text-fg-subtle">
-                <span className="font-medium text-fg-muted">You:</span> {heard}
-              </p>
-            )}
-            {caption && (
-              <p className="line-clamp-4 text-[15px] leading-6 text-fg">{caption.replace(/[#*`_>]/g, "")}</p>
-            )}
+            {/* Fixed height so the orb doesn't jump as captions come and go */}
+            <div className="flex h-[8.5rem] w-full items-start justify-center sm:h-[9.5rem]">
+              {phase === "speaking" && cue ? (
+                <Subtitle cue={cue} />
+              ) : phase === "listening" && interim ? (
+                <p className="subtitle-text line-clamp-3 text-fg-muted">{interim}</p>
+              ) : (
+                heard &&
+                phase !== "listening" && (
+                  <p className="line-clamp-2 text-[15px] leading-6 text-fg-subtle">
+                    <span className="font-medium text-fg-muted">You said:</span> {heard}
+                  </p>
+                )
+              )}
+            </div>
           </div>
         </div>
 

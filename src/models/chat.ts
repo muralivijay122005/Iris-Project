@@ -10,10 +10,19 @@ export interface IAttachment {
   truncated?: boolean;
 }
 
+export interface IImageRef {
+  id: string;
+  prompt: string;
+  width: number;
+  height: number;
+}
+
 export interface IMessage {
   role: "user" | "assistant";
   content: string;
   attachments?: IAttachment[];
+  // Images generated for an assistant reply (bytes live in GeneratedImage)
+  images?: IImageRef[];
   reasoning?: string;
   model?: string;
   interrupted?: boolean;
@@ -46,11 +55,22 @@ const attachmentSchema = new Schema<IAttachment>(
   { _id: false }
 );
 
+const imageRefSchema = new Schema<IImageRef>(
+  {
+    id: { type: String, required: true },
+    prompt: { type: String, default: "" },
+    width: { type: Number, default: 1024 },
+    height: { type: Number, default: 1024 },
+  },
+  { _id: false }
+);
+
 const messageSchema = new Schema<IMessage>({
   role: { type: String, enum: ["user", "assistant"], required: true },
   // Not required: an interrupted reply can be empty
   content: { type: String, default: "" },
   attachments: { type: [attachmentSchema], default: undefined },
+  images: { type: [imageRefSchema], default: undefined },
   reasoning: { type: String },
   model: { type: String },
   interrupted: { type: Boolean },
@@ -108,6 +128,7 @@ export function serializeMessage(msg: any, includeFileContent = false) {
     model: msg.model || undefined,
     interrupted: msg.interrupted || undefined,
     createdAt: msg.createdAt,
+    images: msg.images?.length ? msg.images : undefined,
     attachments: attachments.map((a) => ({
       name: a.name,
       size: a.size,

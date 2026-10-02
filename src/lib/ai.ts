@@ -20,6 +20,7 @@ export interface HistoryMessage {
   role: "user" | "assistant";
   content: string;
   attachments?: HistoryAttachment[];
+  images?: { prompt: string }[];
 }
 
 export interface Preferences {
@@ -33,6 +34,7 @@ export function buildSystemPrompt(opts: {
   userName?: string | null;
   preferences?: Preferences;
   memories?: string[];
+  voice?: boolean;
 }) {
   const today = new Date().toLocaleDateString("en-US", {
     weekday: "long",
@@ -44,7 +46,8 @@ export function buildSystemPrompt(opts: {
   const parts = [
     `You are Iris, a thoughtful, precise and friendly AI assistant. Today is ${today}.`,
     "Format answers in GitHub-flavored Markdown when it helps readability: short paragraphs, headings for long answers, bullet or numbered lists, tables for comparisons, and fenced code blocks with a language tag for any code. Keep simple answers short.",
-    "When the user attaches files, their extracted contents appear inside <attachment> tags in the user's message. Refer to files by name.",
+    "When the user attaches files, their extracted contents appear inside <attachment> tags in the user's message. Refer to files by name. Images arrive as a transcription plus a description written by a vision model; answer as if you saw the image yourself.",
+    "You can create images: a reply that starts with [Generated image: …] means that image was made and shown to the user. When the user asks for an image, the app generates it automatically, so never say you can't create images.",
   ];
 
   if (opts.userName)
@@ -65,8 +68,21 @@ export function buildSystemPrompt(opts: {
     );
   }
 
+  if (opts.voice) parts.push(VOICE_STYLE);
+
   return parts.join("\n\n");
 }
+
+// Overrides the Markdown guidance when the reply will be spoken aloud
+const VOICE_STYLE = `VOICE MODE: The user is talking to you out loud and your reply is converted to speech. This overrides all formatting instructions above.
+- Talk like a helpful person in a natural conversation: warm, clear and to the point. Usually 1 to 4 short sentences; go longer only when the user asks for detail or a step-by-step explanation.
+- Plain spoken sentences only. Never use Markdown, headings, bullet points, numbered lists, tables, bold, code blocks, links, URLs or emojis.
+- Never read out raw data, tables, JSON or long lists of numbers. Summarize what matters instead: the key figure, the top two or three items, or the overall trend, then offer more detail.
+- For steps or options, use spoken transitions like "first", "then" and "finally", and keep to the few that matter most.
+- Write numbers, units and symbols the way they are spoken: "about 3.5 million", "25 degrees", "50 percent", "5 to 10 minutes". Avoid abbreviations that sound odd aloud.
+- If code is needed, describe what it does in words and say the full code can be shared in the chat.
+- If the request is unclear, ask one short clarifying question.
+- End naturally; at most offer one brief follow-up.`;
 
 // Turns stored messages into model messages, inlining attachment text and
 // giving recent attachments priority within the character budget.
@@ -78,6 +94,10 @@ export function buildModelMessages(history: HistoryMessage[]) {
   for (let i = recent.length - 1; i >= 0; i--) {
     const msg = recent[i];
     let content = msg.content || "";
+    if (msg.role === "assistant" && msg.images?.length) {
+      const notes = msg.images.map((im) => `[Generated image: ${im.prompt}]`).join("\n");
+      content = `${notes}\n${content}`.trim();
+    }
 
     if (msg.role === "user" && msg.attachments?.length) {
       const blocks = msg.attachments.map((a) => {

@@ -13,6 +13,8 @@ import {
   LuFiles,
   LuFileType,
   LuImage,
+  LuImagePlus,
+  LuX,
   LuMic,
   LuMicOff,
   LuPlus,
@@ -43,7 +45,7 @@ export interface ComposerHandle {
 }
 
 interface ComposerProps {
-  onSend: (text: string, files: PendingFile[]) => void;
+  onSend: (text: string, files: PendingFile[], options?: { image?: boolean }) => void;
   onStop: () => void;
   onVoiceMode?: () => void;
   isGenerating: boolean;
@@ -52,6 +54,8 @@ interface ComposerProps {
 }
 
 interface AttachOption {
+  /** Special action instead of opening the file picker */
+  action?: "image";
   label: string;
   description: string;
   icon: React.ComponentType<{ size?: number }>;
@@ -64,11 +68,20 @@ interface AttachOption {
 
 const ATTACH_OPTIONS: AttachOption[] = [
   {
+    action: "image",
+    label: "Create image",
+    description: "Describe it and Iris will draw it",
+    icon: LuImagePlus,
+    tone: "text-fuchsia-500 bg-fuchsia-500/12",
+    accept: "",
+  },
+  {
     label: "Photos & images",
     description: "Text and visuals are read by AI",
     icon: LuImage,
     tone: "text-violet-500 bg-violet-500/12",
     accept: "image/*",
+    separatorBefore: true,
   },
   {
     label: "Take photo",
@@ -136,6 +149,7 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   const [files, setFiles] = useState<PendingFile[]>([]);
   const [modelOpen, setModelOpen] = useState(false);
   const [attachMenuOpen, setAttachMenuOpen] = useState(false);
+  const [imageMode, setImageMode] = useState(false);
 
   const onVoiceResult = useCallback((transcript: string) => {
     setText((prev) => {
@@ -215,16 +229,22 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
     }
   }, [autoFocus]);
 
-  const canSend = (text.trim().length > 0 || files.length > 0) && !isGenerating;
+  // Image mode needs a description to draw
+  const canSend = (imageMode ? text.trim().length > 0 : text.trim().length > 0 || files.length > 0) && !isGenerating;
 
   const submit = () => {
     if (!canSend) return;
-    onSend(text.trim(), files);
+    onSend(text.trim(), files, { image: imageMode });
     setText("");
     setFiles([]);
+    setImageMode(false);
   };
 
   const onKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === "Backspace" && imageMode && !text) {
+      setImageMode(false);
+      return;
+    }
     if (e.key !== "Enter" || e.nativeEvent.isComposing) return;
     const mod = e.metaKey || e.ctrlKey;
     if ((settings.sendOnEnter && !e.shiftKey) || (!settings.sendOnEnter && mod)) {
@@ -242,6 +262,12 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
   };
 
   const openAttachOption = (opt: AttachOption) => {
+    if (opt.action === "image") {
+      setAttachMenuOpen(false);
+      setImageMode(true);
+      requestAnimationFrame(() => textareaRef.current?.focus());
+      return;
+    }
     setFileAccept(opt.accept);
     setFileCapture(!!opt.capture);
     setAttachMenuOpen(false);
@@ -256,6 +282,23 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
           "focus-within:border-[color-mix(in_oklch,var(--accent)_45%,var(--border-strong))]"
         )}
       >
+        {imageMode && (
+          <div className="flex px-3 pt-3">
+            <span className="animate-pop-in inline-flex h-7 items-center gap-1.5 rounded-full bg-fuchsia-500/12 pl-2.5 pr-1 text-xs font-medium text-fuchsia-600 dark:text-fuchsia-300">
+              <LuImagePlus size={14} />
+              Create image
+              <button
+                type="button"
+                onClick={() => setImageMode(false)}
+                aria-label="Turn off image mode"
+                className="flex h-5 w-5 items-center justify-center rounded-full hover:bg-fuchsia-500/20"
+              >
+                <LuX size={12} />
+              </button>
+            </span>
+          </div>
+        )}
+
         {files.length > 0 && (
           <div className="flex flex-wrap gap-2 px-3 pt-3">
             {files.map((f) => (
@@ -279,7 +322,7 @@ const Composer = forwardRef<ComposerHandle, ComposerProps>(function Composer(
           onChange={(e) => setText(e.target.value)}
           onKeyDown={onKeyDown}
           onPaste={onPaste}
-          placeholder={placeholder}
+          placeholder={imageMode ? "Describe the image you want…" : placeholder}
           aria-label="Message"
           className="block max-h-[260px] w-full resize-none bg-transparent px-4 pb-1 pt-3.5 text-[15px] leading-6 text-fg outline-none placeholder:text-fg-subtle"
         />

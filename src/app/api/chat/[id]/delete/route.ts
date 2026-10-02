@@ -3,6 +3,7 @@ import { getServerSession } from "next-auth";
 import { connectToDatabase } from "@/lib/mongodb";
 import Chat from "@/models/chat";
 import User from "@/models/user";
+import GeneratedImage from "@/models/image";
 import mongoose from "mongoose";
 import { authOptions } from "@/lib/authoptions";
 
@@ -90,6 +91,8 @@ export async function DELETE(
         { status: 404 }
       );
     }
+
+    await GeneratedImage.deleteMany({ chat: chat._id, user: user._id }).catch(() => {});
 
     console.log(
       "[DELETE /api/chat/[id]/delete] Chat deleted successfully:",

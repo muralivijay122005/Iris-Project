@@ -21,6 +21,15 @@ import { useMediaQuery } from "./ui/primitives";
 
 type Mode = "send" | "edit" | "regenerate";
 
+interface TurnOptions {
+  /** Streams the reply text as it grows */
+  onDelta?: (content: string) => void;
+  /** Reply for speech: no Markdown, tables or emojis */
+  voice?: boolean;
+  /** Generate an image instead of a text reply */
+  image?: boolean;
+}
+
 const SIDEBAR_KEY = "iris-sidebar-collapsed";
 
 const sortChats = (list: ChatSummary[]) =>
@@ -201,8 +210,9 @@ export default function ChatApp() {
       text: string,
       files: PendingFile[],
       index = -1,
-      onDelta?: (content: string) => void
+      opts: TurnOptions = {}
     ): Promise<string | null> => {
+      const { onDelta } = opts;
       if (generatingRef.current) return null;
 
       // Failed replies were never saved; drop them so indexes match the server
@@ -251,6 +261,10 @@ export default function ChatApp() {
       form.append("editIndex", String(index));
       form.append("model", settings.model);
       form.append("temporary", String(isTemp));
+      if (opts.voice) form.append("voice", "true");
+      // Regenerating an image reply draws a new image
+      const regeneratingImage = mode === "regenerate" && !!base[index]?.images?.length;
+      if (opts.image || regeneratingImage) form.append("image", "true");
       if (!isTemp && loadedChatId.current) form.append("chatId", loadedChatId.current);
       if (isTemp) {
         form.append(
@@ -260,6 +274,7 @@ export default function ChatApp() {
               role: m.role,
               content: m.content,
               attachments: m.attachments?.map((a) => ({ name: a.name, type: a.type, content: a.content })),
+              images: m.images?.map((im) => ({ prompt: im.prompt })),
             }))
           )
         );
@@ -354,6 +369,12 @@ export default function ChatApp() {
               }
               break;
             }
+            case "status":
+              patchAssistant({ status: ev.d });
+              break;
+            case "image":
+              patchAssistant({ images: ev.images, status: undefined });
+              break;
             case "reasoning":
               reasoning += ev.d;
               schedule();
@@ -429,9 +450,10 @@ export default function ChatApp() {
     [settings.model, toast]
   );
 
-  const onSend = (text: string, files: PendingFile[]) => runTurn("send", text, files);
+  const onSend = (text: string, files: PendingFile[], options?: { image?: boolean }) =>
+    runTurn("send", text, files, -1, { image: options?.image });
   const askByVoice = useCallback(
-    (text: string, onDelta: (content: string) => void) => runTurn("send", text, [], -1, onDelta),
+    (text: string, onDelta: (content: string) => void) => runTurn("send", text, [], -1, { onDelta, voice: true }),
     [runTurn]
   );
   const onEdit = useCallback((i: number, text: string) => runTurn("edit", text, [], i), [runTurn]);

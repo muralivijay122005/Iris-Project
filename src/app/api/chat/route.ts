@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import Chat, { IMessage, serializeMessage } from "../../../models/chat";
 import Memory from "../../../models/memory";
+import GeneratedImage from "../../../models/image";
+import { generateImage, planImage, wantsImage, SIZES, RateLimitedError } from "../../../lib/imagegen";
 import { requireUser, isObjectId } from "../../../lib/session-user";
 import {
   groq,
@@ -20,7 +22,11 @@ import {
 } from "../../../lib/extract";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+// Image generation on free providers can take a while
+export const maxDuration = 120;
+
+// Emoji and pictographs, stripped from spoken replies
+const EMOJI = /[\p{Extended_Pictographic}\u{1F1E6}-\u{1F1FF}\u{1F3FB}-\u{1F3FF}\u{FE0F}\u{200D}\u{20E3}]/gu;
 
 type Mode = "send" | "edit" | "regenerate";
 
@@ -33,6 +39,7 @@ const toHistory = (msg: any): HistoryMessage => ({
     : msg.fileName
     ? [{ name: msg.fileName, type: msg.fileType || "", content: msg.fileContent || "" }]
     : [],
+  images: msg.images?.length ? msg.images.map((im: any) => ({ prompt: im.prompt || "" })) : undefined,
 });
 
 const jsonError = (error: string, status: number) =>
@@ -55,6 +62,9 @@ export async function POST(req: Request) {
   const mode = ((form.get("mode") as string) || "send") as Mode;
   const editIndex = parseInt((form.get("editIndex") as string) || "-1", 10);
   const model = resolveModel(form.get("model") as string);
+  // Voice chat wants speakable replies; image asks can also be forced from the composer
+  const voiceMode = form.get("voice") === "true";
+  const forceImage = form.get("image") === "true";
   const files = form.getAll("files").filter((f): f is File => f instanceof File);
 
   if (mode !== "regenerate" && !prompt && files.length === 0) {
@@ -156,11 +166,23 @@ export async function POST(req: Request) {
     userName: user.username,
     preferences: prefs,
     memories,
+    voice: voiceMode,
   });
   const modelMessages = [
     { role: "system" as const, content: systemPrompt },
     ...buildModelMessages(history),
   ];
+
+  // Draw instead of chatting when the latest user message asks for an image
+  const lastUser = history[history.length - 1];
+  let prevAssistant: HistoryMessage | null = null;
+  for (let i = history.length - 2; i >= 0 && !prevAssistant; i--) {
+    if (history[i].role === "assistant") prevAssistant = history[i];
+  }
+  const imageTurn =
+    !voiceMode &&
+    lastUser?.role === "user" &&
+    (forceImage || wantsImage(lastUser.content, !!prevAssistant?.images?.length));
 
   // Background jobs run alongside the main completion
   const titleJob =
@@ -168,7 +190,7 @@ export async function POST(req: Request) {
       ? generateTitle(prompt, attachments.map((a) => a.name)).catch(() => null)
       : null;
   const memoryJob =
-    useMemory && prefs.memoryAutoSave !== false && userMessage && prompt
+    useMemory && prefs.memoryAutoSave !== false && userMessage && prompt && !imageTurn
       ? extractMemories(prompt, memories).catch(() => [] as string[])
       : null;
 
@@ -207,8 +229,53 @@ export async function POST(req: Request) {
       let reasoning = "";
       let failed: string | null = null;
       let interrupted = false;
+      let images: { id: string; prompt: string; width: number; height: number }[] | undefined;
 
-      try {
+      if (imageTurn) {
+        try {
+          send({ t: "status", d: "Imagining" });
+          const context = history
+            .slice(-7, -1)
+            .map((m) =>
+              m.role === "assistant" && m.images?.length
+                ? `Assistant generated an image with prompt: ${m.images[0].prompt}`
+                : `${m.role === "user" ? "User" : "Assistant"}: ${m.content.slice(0, 300)}`
+            );
+          const plan = await planImage(lastUser.content, context);
+          send({ t: "status", d: "Painting" });
+          const size = SIZES[plan.aspect];
+          const result = await generateImage({
+            prompt: plan.prompt,
+            ...size,
+            seed: Math.floor(Math.random() * 2_147_483_647),
+            signal: upstream.signal,
+            onStatus: (label) => send({ t: "status", d: label }),
+          });
+          const doc = await GeneratedImage.create({
+            user: user._id,
+            chat: chat?._id,
+            data: result.data,
+            mime: result.mime,
+            prompt: plan.prompt,
+            ...size,
+            provider: result.provider,
+          });
+          images = [{ id: doc._id.toString(), prompt: plan.prompt, ...size }];
+          send({ t: "image", images });
+          content = plan.caption;
+          send({ t: "delta", d: content });
+        } catch (err: any) {
+          if (upstream.signal.aborted || err?.name === "AbortError") {
+            interrupted = true;
+          } else {
+            console.error("[POST /api/chat] Image generation failed:", err?.message);
+            failed =
+              err instanceof RateLimitedError
+                ? err.message
+                : "Couldn't generate that image right now. The image service may be busy, so try again in a moment.";
+          }
+        }
+      } else try {
         const completion = await groq.chat.completions.create(
           {
             model,
@@ -225,8 +292,10 @@ export async function POST(req: Request) {
             send({ t: "reasoning", d: delta.reasoning });
           }
           if (delta.content) {
-            content += delta.content;
-            send({ t: "delta", d: delta.content });
+            const d: string = voiceMode ? delta.content.replace(EMOJI, "") : delta.content;
+            if (!d) continue;
+            content += d;
+            send({ t: "delta", d });
           }
         }
       } catch (err: any) {
@@ -239,7 +308,7 @@ export async function POST(req: Request) {
       }
 
       // Save the reply (partial replies are kept and marked interrupted)
-      if (chat && (content || interrupted) && !failed) {
+      if (chat && (content || images || interrupted) && !failed) {
         await Chat.updateOne(
           { _id: chat._id },
           {
@@ -247,6 +316,7 @@ export async function POST(req: Request) {
               messages: {
                 role: "assistant",
                 content,
+                images,
                 reasoning: reasoning || undefined,
                 model,
                 interrupted: interrupted || undefined,
@@ -345,5 +415,6 @@ export async function DELETE() {
   const { user, error } = await requireUser();
   if (error) return error;
   const result = await Chat.deleteMany({ user: user._id });
+  await GeneratedImage.deleteMany({ user: user._id }).catch(() => {});
   return NextResponse.json({ deleted: result.deletedCount });
 }

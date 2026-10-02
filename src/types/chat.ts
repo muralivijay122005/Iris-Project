@@ -11,10 +11,18 @@ export interface Attachment {
   previewUrl?: string;
 }
 
+export interface GeneratedImageRef {
+  id: string;
+  prompt: string;
+  width: number;
+  height: number;
+}
+
 export interface Message {
   role: "user" | "assistant";
   content: string;
   attachments?: Attachment[];
+  images?: GeneratedImageRef[];
   reasoning?: string;
   model?: string;
   interrupted?: boolean;
@@ -22,6 +30,8 @@ export interface Message {
   // Client-only state
   id?: string;
   pending?: boolean;
+  // Server-reported progress label (e.g. "Painting")
+  status?: string;
   error?: string;
   memoriesAdded?: string[];
 }

@@ -24,14 +24,28 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Recording is too long" }, { status: 413 });
   }
 
+  // Recent conversation text helps Whisper with names, jargon and spelling
+  const context = typeof form.get("prompt") === "string" ? (form.get("prompt") as string).slice(-600) : "";
+  const language = typeof form.get("language") === "string" ? (form.get("language") as string).slice(0, 5) : "";
+
   try {
-    const result = await groq.audio.transcriptions.create({
+    const result: any = await groq.audio.transcriptions.create({
       model: STT_MODEL,
       file: audio,
-      response_format: "json",
+      response_format: "verbose_json",
       temperature: 0,
+      ...(context && { prompt: context }),
+      ...(/^[a-z]{2}$/.test(language) && { language }),
     });
-    return NextResponse.json({ text: (result.text || "").trim() });
+    // Drop segments Whisper itself flags as probably not speech
+    const segments: any[] = Array.isArray(result.segments) ? result.segments : [];
+    const text = segments.length
+      ? segments
+          .filter((s) => !(s.no_speech_prob > 0.6 && s.avg_logprob < -0.8))
+          .map((s) => s.text)
+          .join("")
+      : result.text || "";
+    return NextResponse.json({ text: text.replace(/\s+/g, " ").trim() });
   } catch (err: any) {
     console.warn("[POST /api/voice/transcribe] Failed:", err?.status, err?.message);
     return NextResponse.json({ error: "Couldn't transcribe audio" }, { status: 502 });
